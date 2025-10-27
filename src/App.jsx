@@ -14,28 +14,31 @@ import {
   push,
   get,
   onDisconnect,
-  off
+  off,
+  onChildAdded
 } from "firebase/database";
 
 export default function App() {
-  const [user, setUser] = useState(null); // Hozirgi foydalanuvchi
-  const [email, setEmail] = useState(""); // Login email
-  const [password, setPassword] = useState(""); // Login password
-  const [name, setName] = useState(""); // Foydalanuvchi ismi
-  const [onlineUsers, setOnlineUsers] = useState({}); // Online foydalanuvchilar
-  const [inQueue, setInQueue] = useState(false); // Random queue da turish holati
-  const [roomId, setRoomId] = useState(null); // Hozirgi room id
-  const [role, setRole] = useState(null); // caller / callee
-  const [micOn, setMicOn] = useState(true); // Mic holati
-  const [camOn, setCamOn] = useState(true); // Cam holati
-  const [partnerName, setPartnerName] = useState(""); // Partner ismi
+  const [user, setUser] = useState(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [onlineUsers, setOnlineUsers] = useState({});
+  const [inQueue, setInQueue] = useState(false);
+  const [roomId, setRoomId] = useState(null);
+  const [role, setRole] = useState(null);
+  const [micOn, setMicOn] = useState(true);
+  const [camOn, setCamOn] = useState(true);
+  const [partnerName, setPartnerName] = useState("");
 
-  const localVideoRef = useRef(null); // Local video
-  const remoteVideoRef = useRef(null); // Remote video
-  const pcRef = useRef(null); // RTCPeerConnection
-  const localStreamRef = useRef(null); // Local stream
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
 
-  // --- Firebase Auth + presence ---
+  const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+  // --- Auth & presence ---
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (usr) => {
       setUser(usr);
@@ -48,21 +51,15 @@ export default function App() {
     return unsub;
   }, [name]);
 
-  // Online users listen
   useEffect(() => {
     const onlineRef = ref(db, "online");
-    onValue(onlineRef, (snap) => {
-      setOnlineUsers(snap.val() || {});
-    });
+    onValue(onlineRef, (snap) => setOnlineUsers(snap.val() || {}));
   }, []);
 
-  // Register / Login
   const register = async () => {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
-      if (cred.user) {
-        await set(ref(db, `users/${cred.user.uid}`), { name });
-      }
+      if (cred.user) await set(ref(db, `users/${cred.user.uid}`), { name });
     } catch (e) { alert(e.message); }
   };
 
@@ -71,7 +68,7 @@ export default function App() {
     catch (e) { alert(e.message); }
   };
 
-  // --- Queue (Omegle-style) ---
+  // --- Queue ---
   const enterQueue = async () => {
     if (!user) return alert("Login qilishingiz kerak");
     const uid = user.uid;
@@ -80,10 +77,9 @@ export default function App() {
     onDisconnect(myQueueRef).remove();
     setInQueue(true);
 
-    // Boshqa foydalanuvchi kutyaptimi tekshirish
     const snap = await get(ref(db, "queue"));
     const queueObj = snap.val() || {};
-    const otherUid = Object.keys(queueObj).find((k) => k !== uid);
+    const otherUid = Object.keys(queueObj).find(k => k !== uid);
     if (otherUid) {
       const newRoomRef = push(ref(db, "rooms"));
       const rId = newRoomRef.key;
@@ -117,8 +113,7 @@ export default function App() {
           setRole("caller");
           setPartnerName(onlineUsers[room.callee]?.name || "Unknown");
           joinRoomAsCaller(rId);
-        }
-        else if (room.callee === user.uid) {
+        } else if (room.callee === user.uid) {
           setRole("callee");
           setPartnerName(onlineUsers[room.caller]?.name || "Unknown");
           joinRoomAsCallee(rId);
@@ -128,24 +123,27 @@ export default function App() {
     return () => off(urRef);
   }, [user, onlineUsers]);
 
-  // --- WebRTC setup ---
-  const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
-
+  // --- WebRTC ---
   const createPC = (rId, isCaller) => {
     const pc = new RTCPeerConnection(configuration);
     pcRef.current = pc;
+
     if (localStreamRef.current)
       localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
 
-    // Remote track
-    pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0]; };
+    pc.ontrack = (e) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = e.streams[0];
+        remoteVideoRef.current.play().catch(err => console.warn(err));
+      }
+    };
 
-    // ICE candidates
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
       const side = isCaller ? "callerCandidates" : "calleeCandidates";
       push(ref(db, `rooms/${rId}/candidates/${side}`), e.candidate.toJSON());
     };
+
     return pc;
   };
 
@@ -153,7 +151,10 @@ export default function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        await localVideoRef.current.play().catch(e => console.warn(e));
+      }
 
       const pc = createPC(rId, true);
 
@@ -161,15 +162,15 @@ export default function App() {
       await pc.setLocalDescription(offer);
       await set(ref(db, `rooms/${rId}/offer`), offer.toJSON());
 
-      // Remote answer
       onValue(ref(db, `rooms/${rId}/answer`), async snap => {
-        const ans = snap.val(); if (ans) await pc.setRemoteDescription(ans);
+        const ans = snap.val();
+        if (ans) await pc.setRemoteDescription(ans);
       });
 
-      // Remote candidates
-      onValue(ref(db, `rooms/${rId}/candidates/calleeCandidates`), snap => {
-        const cands = snap.val() || {};
-        Object.values(cands).forEach(async c => { try { await pc.addIceCandidate(c); } catch (e) { console.warn(e); } });
+      // ICE candidates
+      const candRef = ref(db, `rooms/${rId}/candidates/calleeCandidates`);
+      onChildAdded(candRef, async snap => {
+        try { await pc.addIceCandidate(snap.val()); } catch (e) { console.warn(e); }
       });
     } catch (e) { alert("Camera yoki mikrofonga ruxsat kerak!"); console.error(e); }
   };
@@ -178,28 +179,31 @@ export default function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        await localVideoRef.current.play().catch(e => console.warn(e));
+      }
 
       const pc = createPC(rId, false);
 
-      // Remote offer
       onValue(ref(db, `rooms/${rId}/offer`), async snap => {
-        const offer = snap.val(); if (!offer) return;
+        const offer = snap.val();
+        if (!offer) return;
         await pc.setRemoteDescription(offer);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await set(ref(db, `rooms/${rId}/answer`), answer.toJSON());
       });
 
-      // Remote candidates
-      onValue(ref(db, `rooms/${rId}/candidates/callerCandidates`), snap => {
-        const cands = snap.val() || {};
-        Object.values(cands).forEach(async c => { try { await pc.addIceCandidate(c); } catch (e) { console.warn(e); } });
+      // ICE candidates
+      const candRef = ref(db, `rooms/${rId}/candidates/callerCandidates`);
+      onChildAdded(candRef, async snap => {
+        try { await pc.addIceCandidate(snap.val()); } catch (e) { console.warn(e); }
       });
     } catch (e) { alert("Camera yoki mikrofonga ruxsat kerak!"); console.error(e); }
   };
 
-  // --- Leave room / Skip ---
+  // --- Leave / Skip ---
   const leaveRoom = async () => {
     if (!user) return;
     const uid = user.uid;
@@ -221,9 +225,9 @@ export default function App() {
   const skipPartner = async () => {
     await leaveRoom();
     enterQueue();
-  }
+  };
 
-  // --- Logout / Mic / Cam toggle ---
+  // --- Logout / Mic / Cam ---
   const logout = async () => { await leaveQueue(); await leaveRoom(); await signOut(auth); setUser(null); };
   const toggleMic = () => { if (localStreamRef.current) localStreamRef.current.getAudioTracks().forEach(t => t.enabled = !t.enabled); setMicOn(s => !s); };
   const toggleCam = () => { if (localStreamRef.current) localStreamRef.current.getVideoTracks().forEach(t => t.enabled = !t.enabled); setCamOn(s => !s); };
