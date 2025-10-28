@@ -17,8 +17,6 @@ export default function App() {
   const [inQueue, setInQueue] = useState(false);
   const [roomId, setRoomId] = useState(null);
   const [partnerName, setPartnerName] = useState("");
-  const [micOn, setMicOn] = useState(true);
-  const [camOn, setCamOn] = useState(true);
 
   const iframeRef = useRef(null);
 
@@ -98,7 +96,6 @@ export default function App() {
         const room = roomSnap.val(); if (!room) return;
         const otherUid = room.caller === user.uid ? room.callee : room.caller;
         setPartnerName(onlineUsers[otherUid]?.name || "Unknown");
-        // Auto join Jitsi
         if (iframeRef.current) {
           const roomName = `jonchat_${rId}`;
           iframeRef.current.src = `https://meet.jit.si/${roomName}#userInfo.displayName="${name}"`;
@@ -121,7 +118,7 @@ export default function App() {
   const logout = async () => { await leaveQueue(); await leaveRoom(); await signOut(auth); setUser(null); };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center">
+    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
       {!user && (
         <div className="bg-white p-8 rounded-2xl shadow-lg w-full max-w-md flex flex-col gap-4">
           <h2 className="text-3xl font-bold text-center text-orange-500">VideoChat</h2>
@@ -137,17 +134,21 @@ export default function App() {
 
       {user && (
         <div className="flex flex-col lg:flex-row gap-6 w-full max-w-6xl mt-6">
-          <div className="flex-1 bg-black rounded-2xl relative aspect-video shadow-lg overflow-hidden">
+          {/* Video container */}
+          <div className="flex-1 bg-black rounded-2xl relative shadow-lg overflow-hidden h-[50vh] lg:h-[60vh]">
             <iframe ref={iframeRef} allow="camera; microphone; fullscreen; display-capture" className="w-full h-full" />
+            {/* Buttons */}
             <div className="absolute bottom-4 left-4 flex gap-2 flex-wrap">
               {!roomId && <button onClick={enterQueue} className="px-4 py-2 rounded-full bg-blue-500 text-white">{inQueue ? "Waiting..." : "Start Random Call"}</button>}
               {roomId && <button onClick={leaveRoom} className="px-4 py-2 rounded-full bg-red-600 text-white">Hang Up</button>}
               {roomId && <button onClick={skipPartner} className="px-4 py-2 rounded-full bg-yellow-500 text-white">Skip</button>}
               <button onClick={logout} className="px-4 py-2 rounded-full bg-gray-700 text-white">Logout</button>
             </div>
+            {/* Partner name */}
             {roomId && <div className="absolute top-4 left-4 px-3 py-1 bg-black bg-opacity-50 text-white rounded-full">Partner: {partnerName}</div>}
           </div>
 
+          {/* Online Users */}
           <div className="w-full lg:w-80 bg-white p-4 rounded-2xl shadow-lg">
             <h3 className="font-semibold text-lg mb-3">Online Users</h3>
             <div className="flex flex-col gap-2 max-h-96 overflow-y-auto">
