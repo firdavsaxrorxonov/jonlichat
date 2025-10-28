@@ -6,7 +6,7 @@ import {
   onAuthStateChanged,
   signOut
 } from "firebase/auth";
-import { ref, set, onValue, push, remove, onDisconnect, onChildAdded } from "firebase/database";
+import { ref, set, onValue, push, remove, onDisconnect } from "firebase/database";
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -16,17 +16,11 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState({});
   const [inQueue, setInQueue] = useState(false);
   const [roomId, setRoomId] = useState(null);
-  const [role, setRole] = useState(null);
   const [partnerName, setPartnerName] = useState("");
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
 
-  const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
-  const pcRef = useRef(null);
-  const localStreamRef = useRef(null);
-
-  const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+  const iframeRef = useRef(null);
 
   // --- Auth & presence ---
   useEffect(() => {
@@ -59,6 +53,7 @@ export default function App() {
     catch (e) { alert(e.message); }
   };
 
+  // --- Queue logic ---
   const enterQueue = async () => {
     if (!user) return alert("Login qilishingiz kerak!");
     const uid = user.uid;
@@ -67,9 +62,9 @@ export default function App() {
     onDisconnect(myQueueRef).remove();
     setInQueue(true);
 
-    const snap = await ref(db, "queue");
-    onValue(snap, async (s) => {
-      const queueObj = s.val() || {};
+    const queueRef = ref(db, "queue");
+    onValue(queueRef, async (snap) => {
+      const queueObj = snap.val() || {};
       const otherUid = Object.keys(queueObj).find(k => k !== uid);
       if (otherUid) {
         const newRoomRef = push(ref(db, "rooms"));
@@ -90,118 +85,40 @@ export default function App() {
     setInQueue(false);
   };
 
-  // --- WebRTC setup ---
-  const createPC = (rId, isCaller) => {
-    const pc = new RTCPeerConnection(configuration);
-    pcRef.current = pc;
-
-    if (localStreamRef.current)
-      localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
-
-    pc.ontrack = (e) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = e.streams[0];
-        remoteVideoRef.current.play().catch(err => console.warn(err));
-      }
-    };
-
-    pc.onicecandidate = (e) => {
-      if (!e.candidate) return;
-      const side = isCaller ? "callerCandidates" : "calleeCandidates";
-      push(ref(db, `rooms/${rId}/candidates/${side}`), e.candidate.toJSON());
-    };
-
-    return pc;
-  };
-
-  const joinRoomAsCaller = async (rId) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localStreamRef.current = stream;
-      if (localVideoRef.current) { localVideoRef.current.srcObject = stream; await localVideoRef.current.play(); }
-      const pc = createPC(rId, true);
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await set(ref(db, `rooms/${rId}/offer`), offer.toJSON());
-
-      // listen for answer
-      onValue(ref(db, `rooms/${rId}/answer`), async snap => {
-        const ans = snap.val();
-        if (ans) await pc.setRemoteDescription(ans);
-      });
-
-      // listen for callee ICE
-      const candRef = ref(db, `rooms/${rId}/candidates/calleeCandidates`);
-      onChildAdded(candRef, async snap => {
-        try { await pc.addIceCandidate(snap.val()); } catch (e) { console.warn(e); }
-      });
-
-    } catch (e) { alert("Camera yoki mikrofonga ruxsat kerak!"); console.error(e); }
-  };
-
-  const joinRoomAsCallee = async (rId) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localStreamRef.current = stream;
-      if (localVideoRef.current) { localVideoRef.current.srcObject = stream; await localVideoRef.current.play(); }
-      const pc = createPC(rId, false);
-
-      onValue(ref(db, `rooms/${rId}/offer`), async snap => {
-        const offer = snap.val(); if (!offer) return;
-        await pc.setRemoteDescription(offer);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await set(ref(db, `rooms/${rId}/answer`), answer.toJSON());
-      });
-
-      const candRef = ref(db, `rooms/${rId}/candidates/callerCandidates`);
-      onChildAdded(candRef, async snap => {
-        try { await pc.addIceCandidate(snap.val()); } catch (e) { console.warn(e); }
-      });
-
-    } catch (e) { alert("Camera yoki mikrofonga ruxsat kerak!"); console.error(e); }
-  };
-
+  // --- Room join logic ---
   useEffect(() => {
     if (!user) return;
     const urRef = ref(db, `userRooms/${user.uid}`);
-    onValue(urRef, async snap => {
+    onValue(urRef, (snap) => {
       const rId = snap.val();
-      if (!rId) { setRoomId(null); setRole(null); setPartnerName(""); return; }
+      if (!rId) { setRoomId(null); setPartnerName(""); return; }
       setRoomId(rId);
-      const roomSnap = await ref(db, `rooms/${rId}`);
-      onValue(roomSnap, async s => {
-        const room = s.val(); if (!room) return;
-        if (room.caller === user.uid) {
-          setRole("caller");
-          setPartnerName(onlineUsers[room.callee]?.name || "Unknown");
-          joinRoomAsCaller(rId);
-        } else if (room.callee === user.uid) {
-          setRole("callee");
-          setPartnerName(onlineUsers[room.caller]?.name || "Unknown");
-          joinRoomAsCallee(rId);
+      const roomRef = ref(db, `rooms/${rId}`);
+      onValue(roomRef, (roomSnap) => {
+        const room = roomSnap.val(); if (!room) return;
+        const otherUid = room.caller === user.uid ? room.callee : room.caller;
+        setPartnerName(onlineUsers[otherUid]?.name || "Unknown");
+        // Auto join Jitsi
+        if (iframeRef.current) {
+          const roomName = `jonchat_${rId}`;
+          iframeRef.current.src = `https://meet.jit.si/${roomName}#userInfo.displayName="${name}"`;
         }
       });
     });
-  }, [user, onlineUsers]);
+  }, [user, onlineUsers, name]);
 
   const leaveRoom = async () => {
     if (!user) return;
     const uid = user.uid;
     const rRef = ref(db, `userRooms/${uid}`);
     await remove(rRef);
-    if (pcRef.current) pcRef.current.close();
-    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-    setRoomId(null); setRole(null); setPartnerName("");
+    if (iframeRef.current) iframeRef.current.src = "";
+    setRoomId(null);
+    setPartnerName("");
   };
 
   const skipPartner = async () => { await leaveRoom(); enterQueue(); };
   const logout = async () => { await leaveQueue(); await leaveRoom(); await signOut(auth); setUser(null); };
-  const toggleMic = () => { if (localStreamRef.current) localStreamRef.current.getAudioTracks().forEach(t => t.enabled = !t.enabled); setMicOn(s => !s); };
-  const toggleCam = () => { if (localStreamRef.current) localStreamRef.current.getVideoTracks().forEach(t => t.enabled = !t.enabled); setCamOn(s => !s); };
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center">
@@ -221,11 +138,8 @@ export default function App() {
       {user && (
         <div className="flex flex-col lg:flex-row gap-6 w-full max-w-6xl mt-6">
           <div className="flex-1 bg-black rounded-2xl relative aspect-video shadow-lg overflow-hidden">
-            <video ref={localVideoRef} autoPlay playsInline muted className="absolute w-full h-full object-cover" />
-            <video ref={remoteVideoRef} autoPlay playsInline className="absolute w-full h-full object-cover" />
+            <iframe ref={iframeRef} allow="camera; microphone; fullscreen; display-capture" className="w-full h-full" />
             <div className="absolute bottom-4 left-4 flex gap-2 flex-wrap">
-              <button onClick={toggleMic} className={`px-4 py-2 rounded-full ${micOn ? "bg-green-500" : "bg-red-500"} text-white`}>{micOn ? "Mic ON" : "Mic OFF"}</button>
-              <button onClick={toggleCam} className={`px-4 py-2 rounded-full ${camOn ? "bg-green-500" : "bg-red-500"} text-white`}>{camOn ? "Cam ON" : "Cam OFF"}</button>
               {!roomId && <button onClick={enterQueue} className="px-4 py-2 rounded-full bg-blue-500 text-white">{inQueue ? "Waiting..." : "Start Random Call"}</button>}
               {roomId && <button onClick={leaveRoom} className="px-4 py-2 rounded-full bg-red-600 text-white">Hang Up</button>}
               {roomId && <button onClick={skipPartner} className="px-4 py-2 rounded-full bg-yellow-500 text-white">Skip</button>}
